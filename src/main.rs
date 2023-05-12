@@ -3,15 +3,16 @@ use bevy::prelude::*;
 use bevy::sprite::collide_aabb::collide;
 use bevy::window::PrimaryWindow;
 use bevy_inspector_egui::prelude::*;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::{ResourceInspectorPlugin, WorldInspectorPlugin};
+use std::any::Any;
 
 mod components;
 mod enemy;
 mod player;
 
 use crate::components::{
-    Enemy, Explosion, ExplosionTimer, ExplosionToSpawn, FromPlayer, Laser, Movable, SpriteSize,
-    Velocity,
+    Enemy, Explosion, ExplosionTimer, ExplosionToSpawn, FromEnemy, FromPlayer, Laser, Movable,
+    Player, SpriteSize, Velocity,
 };
 use enemy::EnemyPlugin;
 use player::PlayerPlugin;
@@ -34,7 +35,9 @@ const SPRITE_SCALE: (f32, f32) = (0.5, 0.5);
 const TIME_STEP: f32 = 1. / 60.;
 const BASE_SPEED: f32 = 50.;
 
+const PLAYER_RESPAWN_DELAY: f64 = 2.;
 const ENEMY_MAX: u32 = 2;
+const FORMATION_MEMBERS_MAX: u32 = 2;
 
 #[derive(Resource, Debug)]
 pub struct WinSize {
@@ -51,9 +54,37 @@ pub struct GameTexture {
     explosion: Handle<TextureAtlas>,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Reflect, Default)]
+#[reflect(Resource)]
 struct EnemyCount {
     count: u32,
+}
+
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
+struct PlayerState {
+    on: bool,
+    last_shot: f64,
+}
+
+impl Default for PlayerState {
+    fn default() -> Self {
+        Self {
+            on: false,
+            last_shot: -1.,
+        }
+    }
+}
+
+impl PlayerState {
+    pub fn shot(&mut self, time: f64) {
+        self.on = false;
+        self.last_shot = time;
+    }
+    pub fn spawned(&mut self) {
+        self.on = true;
+        self.last_shot = -1.;
+    }
 }
 
 fn main() {
@@ -68,7 +99,9 @@ fn main() {
             ..default()
         }))
         // Inspector Setup
-        .add_plugin(WorldInspectorPlugin::new())
+        //.add_plugin(WorldInspectorPlugin::new())
+        //.add_plugin(ResourceInspectorPlugin::<PlayerState>::default())
+        //.add_plugin(ResourceInspectorPlugin::<EnemyCount>::default())
         .add_startup_systems((setup_camera, setup_system))
         .add_plugin(PlayerPlugin)
         .add_plugin(EnemyPlugin)
@@ -76,6 +109,7 @@ fn main() {
             movable_system,
             player_laser_hit_enemy_system,
             explosion_to_spawn_system,
+            enemy_laser_hit_player_system,
             explosion_animation_system,
         ))
         .run();
@@ -173,6 +207,36 @@ fn player_laser_hit_enemy_system(
             }
         })
     })
+}
+
+fn enemy_laser_hit_player_system(
+    mut commands: Commands,
+    mut player_state: ResMut<PlayerState>,
+    time: Res<Time>,
+    laser_query: Query<(Entity, &Transform, &SpriteSize), (With<Laser>, With<FromEnemy>)>,
+    player_query: Query<(Entity, &Transform, &SpriteSize), With<Player>>,
+) {
+    if let Ok((player_entity, player_transform, player_size)) = player_query.get_single() {
+        let player_scale = player_transform.scale.xy();
+        for (laser_entity, laser_transform, laser_sprite_size) in laser_query.iter() {
+            let laser_scale = laser_transform.scale.xy();
+
+            let collision = collide(
+                player_transform.translation,
+                player_size.0 * player_scale,
+                laser_transform.translation,
+                laser_sprite_size.0 * laser_scale,
+            );
+
+            if collision.is_some() {
+                commands.entity(laser_entity).despawn();
+                commands.entity(player_entity).despawn();
+                player_state.shot(time.elapsed_seconds_f64());
+                commands.spawn(ExplosionToSpawn(player_transform.translation));
+                break;
+            }
+        }
+    }
 }
 
 fn explosion_to_spawn_system(
